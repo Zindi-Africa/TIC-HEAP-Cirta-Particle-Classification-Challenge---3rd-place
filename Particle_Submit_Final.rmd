@@ -1,0 +1,399 @@
+---
+title: "Particle Classification"
+author: "Dr Fad"
+date: "Feb 12, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load libraries
+
+```{r cars}
+rm(list = ls())
+# library(keras)
+# library(tensorflow)
+library(EBImage)
+# use_condaenv("r-tensorflow")
+# install_keras()
+# library(sf)
+# library(spdep)
+library(rgdal)
+
+## Import packages
+library(ggplot2)
+library(gridExtra)
+library(repr)
+library(dplyr)
+library(caret)
+library(e1071)
+library(MLmetrics)
+library(klaR)
+library(gdalUtils)
+library(raster) #Manipulating geospatil images
+library(sqldf) #Running sql type of query
+library(Matrix) # For matrix conversion used for xgboost
+library(beepr) #For output sound
+library(stringi) #For text manipulation
+library(stringr) #For text manipulation
+library(lubridate) #For manipulating dates
+library(geosphere) #For getting distance from geospatial data i.e long and lat
+library(factoextra) #To visualise clusters
+library(fpc) # for computing density based clustering
+library(dbscan) # for computing density based clustering
+library(tictoc) #To calculate running time
+library(mapproj) #To map projections
+library(catboost) #For modelling
+# library(lightgbm)
+library(ROCR) #Visualising performance of classifiers
+library(ggplot2) # Data visualization
+library(xgboost)
+
+options(repr.plot.width=4, repr.plot.height=4)
+options(scipen=99999999) # Used to revoke display of scientific numbers
+```
+
+
+##Read load and test
+```{r}
+tic()
+Particle_train <- read.csv("C:/Users/A199702/Documents/Zindi/Particle physics/train.csv")
+Particle_test <- read.csv("C:/Users/A199702/Documents/Zindi/Particle physics/Test2.csv")
+toc()
+head(Particle_train)
+
+#Use this to verify final submission file
+Check_dim_test <- dim(unique(Particle_test[,c(3:102)]))
+
+#Remove duplicates
+Particle_train <- unique(Particle_train[,c(3:103)])
+head(Particle_train)
+
+#Subset test with new train columns excluding the target
+Particle_test <- Particle_test[,c(2:102)]
+head(Particle_train)
+head(Particle_test)
+
+#Change col names
+colnames(Particle_train)[2:101] <- paste0("X", seq(1,100,1)) 
+colnames(Particle_test)[2:101] <- paste0("X", seq(1,100,1)) 
+
+toc()
+```
+
+#Feature Engineering
+```{r}
+tic()
+#Create sum of all rows
+Particle_train$sum_100 <- rowSums(Particle_train[,c(2:101)])
+Particle_test$sum_100 <- rowSums(Particle_test[,c(2:101)])
+
+#Get sd
+Particle_train$sd_100 <- apply(Particle_train[,c(2:101)],1, sd, na.rm = TRUE)
+Particle_test$sd_100 <- apply(Particle_test[,c(2:101)],1, sd, na.rm = TRUE)
+
+#Get sum of first 3 by 3 diagonal block
+# paste0("X", seq(1,3,1))
+Particle_train$sum_1st_diag_3by3 <- rowSums(Particle_train[,c(paste0("X", seq(1,3,1)),
+                                                              paste0("X", seq(11,13,1)),
+                                                              paste0("X", seq(21,23,1)))])
+
+Particle_test$sum_1st_diag_3by3 <- rowSums(Particle_test[,c(paste0("X", seq(1,3,1)),
+                                                              paste0("X", seq(11,13,1)),
+                                                              paste0("X", seq(21,23,1)))])
+#Get sum of last 3 by 3 diagonal block
+Particle_train$sum_last_diag_3by3 <- rowSums(Particle_train[,c(paste0("X", seq(78,80,1)),
+                                                              paste0("X", seq(88,90,1)),
+                                                              paste0("X", seq(98,100,1)))])
+
+Particle_test$sum_last_diag_3by3 <- rowSums(Particle_test[,c(paste0("X", seq(78,80,1)),
+                                                              paste0("X", seq(88,90,1)),
+                                                              paste0("X", seq(98,100,1)))])
+
+Particle_train$Ratio_1st_last_3by3 <- ((Particle_train$sum_1st_diag_3by3 - Particle_train$sum_last_diag_3by3)+1)/
+                                  ((Particle_train$sum_1st_diag_3by3 + Particle_train$sum_last_diag_3by3)+1)
+
+Particle_test$Ratio_1st_last_3by3 <- ((Particle_test$sum_1st_diag_3by3 - Particle_test$sum_last_diag_3by3) +1)/
+                                  ((Particle_test$sum_1st_diag_3by3 + Particle_test$sum_last_diag_3by3)+1)
+
+#Diagonal features
+Particle_train$sum_diagonal <- Particle_train$X1 + Particle_train$X12 + Particle_train$X23 + 
+                                    Particle_train$X34 + Particle_train$X45 + Particle_train$X56 +
+  Particle_train$X67 + Particle_train$X78 + Particle_train$X89 + Particle_train$X100
+
+Particle_test$sum_diagonal <- Particle_test$X1 + Particle_test$X12 + Particle_test$X23 +
+  Particle_test$X34 + Particle_test$X45 + Particle_test$X56 + Particle_test$X67 + Particle_test$X78 + Particle_test$X89 + Particle_test$X100
+head(Particle_train)
+save(Particle_train,Particle_test,file = "Particle_train_test.rda")
+toc()
+```
+
+#Data Exploration
+```{r}
+# plot_box <- function(df, cols, col_x = 'class'){
+#   options(repr.plot.width = 4, repr.plot.height = 3.5)
+#   for(col in cols){
+#     p = ggplot(df, aes_string(col_x,col)) +
+#       geom_boxplot() +
+#       ggtitle(paste('Box plot of ', col, '\n vs. ', col_x))
+#     print(p)
+#   }
+# }
+# 
+# num_cols = colnames(Particle_train[,c(102:107)])
+# plot_box(Particle_train, num_cols)
+# summary(Particle_train)
+```
+
+##Balance Data using SMOTE
+```{r}
+load("Particle_train_test.rda")
+library(UBL) #For SMOOTE
+table(Particle_train$class)
+set.seed(200)
+# Particle_train<-  SmoteClassif(class ~ ., Particle_train, list(`electron` = 17.37, `kaon` = 1,`muon` = 39.66, `pion` = 0.3, `proton`= 1)) #Trying to balance the target based on the percentage distribution
+
+# Particle_train<-  SmoteClassif(class ~ ., Particle_train, list(`electron` = 17, `kaon` = 1,`muon` = 33, `pion` = 0.3, `proton`= 1))#First
+
+Particle_train<-  SmoteClassif(class ~ ., Particle_train, list(`electron` = 15, `kaon` = 1,`muon` = 13, `pion` = 0.3, `proton`= 1))
+table(Particle_train$class)
+```
+#Parameter Tuning
+
+```{r}
+# tic()
+# input_x <- as.matrix(Particle_train[,-c(1)])
+# input_y <- Particle_train$class #must be factors
+# levels(input_y) <- c("electron", "kaon","muon","pion","proton")
+# 
+# 
+# ##########################################################
+# # XGboost with default parameters
+# ##########################################################
+# # note to start nrounds from 200, as smaller learning rates result in errors so
+# # big with lower starting points that they'll mess the scales
+# tune_grid <- expand.grid(
+#   nrounds = seq(from = 50, to = 350, by = 50),
+#   eta = c(0.3),
+#   max_depth = c(3,4),
+#   gamma = c(0.1),
+#   colsample_bytree = c(0.8),
+#   min_child_weight = c(1,3),
+#   subsample = c(0.8)
+# )
+# 
+# tune_control <- caret::trainControl(
+#   method = "cv", # cross-validation
+#   number = 10, # with n folds 
+#   #index = createFolds(tr_treated$Id_clean), # fix the folds
+#   verboseIter = FALSE, # no training log
+#   allowParallel = TRUE, # FALSE for reproducible results
+#   classProbs=TRUE,
+#   summaryFunction = multiClassSummary
+# )
+# 
+# xgb_tune <- caret::train(
+#   x = input_x,
+#   y = input_y,
+#   trControl = tune_control,
+#   tuneGrid = tune_grid,
+#   method = "xgbTree",
+#   verbose = TRUE,
+#   metric="logLoss"
+# )
+# 
+# # helper function for the plots
+# tuneplot <- function(x, probs = .90) {
+#   ggplot(x) +
+#     coord_cartesian(ylim = c(quantile(x$results$logLoss, probs = probs), min(x$results$logLoss))) +
+#     theme_bw()
+# }
+# 
+# tuneplot(xgb_tune)
+# xgb_tune$bestTune
+# min(xgb_tune$results$logLoss)
+# library(beepr)
+# beep(6)
+# toc()
+```
+
+#Cross validation or xgboost
+
+```{r}
+
+
+#Remove Field ID from train features
+Train_XG <- Particle_train
+table(Train_XG$class)
+Test_XG <- Particle_test[,-c(1)]
+
+train = Train_XG #training partition
+
+#Create Matrix
+dtrain <- sparse.model.matrix(class ~ . -1, data = train)
+feature_names <- names(dtrain)
+target <- as.numeric(train[,"class"])-1
+dtrain <- xgb.DMatrix( data = as.matrix(dtrain), label = target, missing= NA)
+
+###################
+#XG Boost setup 
+###################
+
+dtest_F <- xgb.DMatrix(data=as.matrix( Test_XG))
+
+###################
+#Cross Validation
+###################
+# Set up cross-validation scheme (3-fold)
+foldsCV <- createFolds(target, k=5, list=TRUE, returnTrain=FALSE)
+
+
+  # param <- list(booster = "gbtree"
+  #             , objective = "multi:softprob"
+  #             , subsample = 0.7
+  #             , max_depth = 3
+  #             , colsample_bytree = 0.4
+  #             , eta = 0.05 #0.032
+  #             #, lambda = 0.08
+  #             , eval_metric = 'mlogloss'
+  #             , num_class = 5
+  #             , gamma = 0
+  #             #, base_score = 0.012 #average
+  #             , min_child_weight = 2
+  #               )
+  param <- list(booster = "gbtree"
+              , objective = "multi:softprob"
+              , subsample = 0.55
+              , max_depth = 2
+              , colsample_bytree = 0.29
+              , eta = 0.019 #0.019
+              #, lambda = 0.08
+              , eval_metric = 'mlogloss'
+              , num_class = 5
+              , gamma = 0
+              #, base_score = 0.012 #average
+              , min_child_weight = 20 #20
+                )
+# xgb_cv <- xgb.cv(data=dtrain,
+#                    params=param,
+#                   nrounds=200,
+#                   prediction=TRUE,
+#                   maximize=FALSE,
+#                   folds=foldsCV,
+#                   early_stopping_rounds = 20,
+#                   print_every_n = 5
+#   )
+#   
+# 
+#   # Check best results and get best nrounds
+#   # print(xgb_cv$evaluation_log[which.min(xgb_cv$evaluation_log$test_mae_mean)])
+  # nrounds <- xgb_cv$best_iteration
+```
+#Shell
+```{r}
+# load("Particle_train_test.rda")
+# library(UBL) #For SMOOTE
+# table(Particle_train$class)
+# set.seed(200)
+# # Particle_train<-  SmoteClassif(class ~ ., Particle_train, list(`electron` = 17.37, `kaon` = 1,`muon` = 39.66, `pion` = 0.3, `proton`= 1)) #Trying to balance the target based on the percentage distribution
+# 
+# # Particle_train<-  SmoteClassif(class ~ ., Particle_train, list(`electron` = 17, `kaon` = 1,`muon` = 33, `pion` = 0.3, `proton`= 1))#First
+# 
+# Particle_train<-  SmoteClassif(class ~ ., Particle_train, list(`electron` = 15, `kaon` = 1,`muon` = 13, `pion` = 0.3, `proton`= 1))
+# 
+# 
+# #Remove Field ID from train features
+# Train_XG <- Particle_train
+# table(Train_XG$class)
+# Test_XG <- Particle_test[,-c(1)]
+# 
+# train = Train_XG #training partition
+# 
+# #Create Matrix
+# dtrain <- sparse.model.matrix(class ~ . -1, data = train)
+# feature_names <- names(dtrain)
+# target <- as.numeric(train[,"class"])-1
+# dtrain <- xgb.DMatrix( data = as.matrix(dtrain), label = target, missing= NA)
+# 
+# ###################
+# #XG Boost setup 
+# ###################
+# 
+# dtest_F <- xgb.DMatrix(data=as.matrix( Test_XG))
+# 
+# ###################
+# #Cross Validation
+# ###################
+# # Set up cross-validation scheme (3-fold)
+# foldsCV <- createFolds(target, k=5, list=TRUE, returnTrain=FALSE)
+# 
+# 
+#   param <- list(booster = "gbtree"
+#               , objective = "multi:softprob"
+#               , subsample = 0.55
+#               , max_depth = 2
+#               , colsample_bytree = 0.29
+#               , eta = 0.019 #0.019
+#               #, lambda = 0.08
+#               , eval_metric = 'mlogloss'
+#               , num_class = 5
+#               , gamma = 0
+#               #, base_score = 0.012 #average
+#               , min_child_weight = 20 #20
+#                 )
+```
+
+
+
+```{r}
+
+  ################
+  # Final model
+  ################
+  set.seed(987654321)
+  xgb <- xgboost::xgboost(params = param
+                   , data = dtrain
+                  # , watchlist = list(train = dtrain)
+                   , nrounds = 226
+                   , verbose = 1
+                   , print_every_n = 2
+                   #, feval = amm_mae
+                  )
+  ###############
+  # Results
+  ###############
+  #Feature imprtance
+  imp <- xgb.importance(feature_names, model =xgb)
+  imp
+  xgb.plot.importance(imp)
+  # imp$Feature
+  
+  
+  #Submission
+  test_new <- as.matrix(Test_XG)
+
+  
+  #Prep for submit
+  Check_XG <- predict(xgb, newdata = test_new)
+  Check_XG <- as.data.frame(matrix(Check_XG,ncol =5, byrow=T))
+  Particle_Submit <- cbind(Particle_test,Check_XG)
+  c1<- ncol(Particle_Submit)-4
+  c2<- ncol(Particle_Submit)
+  Particle_Submit <- Particle_Submit[,c(1,c1:c2)]
+  table(Particle_train$class)
+  colnames(Particle_Submit)[2:6] <- c("electron", "kaon","muon","pion","proton")
+  Particle_Submit <- Particle_Submit[,c("image","electron","muon","pion", "kaon","proton")]
+  
+  Particle_Submit$pion <-  Particle_Submit$pion *1.1
+
+  write.csv(Particle_Submit, file = "C:/Users/A199702/Documents/Zindi/Particle physics/Particle_Submit.csv", row.names = F)
+  Particle_Submit
+  beep(6)
+
+```
+
+```{r}
+
+```
+
